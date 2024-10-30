@@ -1,0 +1,267 @@
+CREATE DATABASE IF NOT EXISTS Fintech;
+
+USE Fintech;
+
+CREATE TABLE Cliente (
+    cliente_id INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(100) NOT NULL,
+    cpf VARCHAR(11) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    telefone VARCHAR(15),
+    data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE Conta (
+    conta_id INT AUTO_INCREMENT PRIMARY KEY,
+    cliente_id INT,
+    numero_conta VARCHAR(20) UNIQUE NOT NULL,
+    saldo DECIMAL(15, 2) DEFAULT 0.00,
+    tipo_conta ENUM('corrente', 'poupanca') NOT NULL,
+    data_abertura TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (cliente_id) REFERENCES Cliente(cliente_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Transacao (
+    transacao_id INT AUTO_INCREMENT PRIMARY KEY,
+    conta_origem INT,
+    conta_destino INT,
+    tipo_transacao ENUM('deposito', 'saque', 'transferencia') NOT NULL,
+    valor DECIMAL(15, 2) NOT NULL,
+    data_transacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (conta_origem) REFERENCES Conta(conta_id) ON DELETE SET NULL,
+    FOREIGN KEY (conta_destino) REFERENCES Conta(conta_id) ON DELETE SET NULL
+);
+
+CREATE TABLE CartaoCredito (
+    cartao_id INT AUTO_INCREMENT PRIMARY KEY,
+    cliente_id INT,
+    numero_cartao VARCHAR(16) UNIQUE NOT NULL,
+    limite DECIMAL(15, 2) DEFAULT 5000.00,
+    saldo_usado DECIMAL(15, 2) DEFAULT 0.00,
+    data_criacao TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (cliente_id) REFERENCES Cliente(cliente_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Fatura (
+    fatura_id INT AUTO_INCREMENT PRIMARY KEY,
+    cartao_id INT,
+    data_inicio DATE,
+    data_fim DATE,
+    valor_total DECIMAL(15, 2) DEFAULT 0.00,
+    valor_pago DECIMAL(15, 2) DEFAULT 0.00,
+    status ENUM('pendente', 'paga') DEFAULT 'pendente',
+    FOREIGN KEY (cartao_id) REFERENCES CartaoCredito(cartao_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Compra (
+    compra_id INT AUTO_INCREMENT PRIMARY KEY,
+    cartao_id INT,
+    descricao VARCHAR(255) NOT NULL,
+    valor DECIMAL(15, 2) NOT NULL,
+    data_compra TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (cartao_id) REFERENCES CartaoCredito(cartao_id) ON DELETE CASCADE
+);
+
+CREATE TABLE Emprestimo (
+    emprestimo_id INT AUTO_INCREMENT PRIMARY KEY,
+    cliente_id INT,
+    valor_emprestimo DECIMAL(15, 2) NOT NULL,
+    juros_mensal DECIMAL(5, 2) NOT NULL,
+    numero_parcelas INT NOT NULL,
+    valor_parcela DECIMAL(15, 2),
+    valor_pago DECIMAL(15, 2) DEFAULT 0.00,
+    status ENUM('ativo', 'pago') DEFAULT 'ativo',
+    data_inicio DATE,
+    FOREIGN KEY (cliente_id) REFERENCES Cliente(cliente_id) ON DELETE CASCADE
+);
+
+CREATE TABLE ParcelaEmprestimo (
+    parcela_id INT AUTO_INCREMENT PRIMARY KEY,
+    emprestimo_id INT,
+    numero_parcela INT,
+    valor DECIMAL(15, 2),
+    status ENUM('pendente', 'paga') DEFAULT 'pendente',
+    data_vencimento DATE,
+    data_pagamento DATE,
+    FOREIGN KEY (emprestimo_id) REFERENCES Emprestimo(emprestimo_id) ON DELETE CASCADE
+);
+
+-- Inserindo registros na tabela Cliente
+INSERT INTO Cliente (nome, cpf, email, telefone) VALUES 
+('Maria Silva', '12345678901', 'maria.silva@email.com', '11987654321'),
+('João Souza', '23456789012', 'joao.souza@email.com', '11976543210');
+
+-- Inserindo registros na tabela Conta
+INSERT INTO Conta (cliente_id, numero_conta, saldo, tipo_conta) VALUES 
+(1, '1234567890', 5000.00, 'corrente'),
+(2, '0987654321', 1500.00, 'poupanca');
+
+-- Inserindo registros na tabela Transacao
+INSERT INTO Transacao (conta_origem, conta_destino, tipo_transacao, valor) VALUES 
+(1, 2, 'transferencia', 200.00),
+(1, NULL, 'saque', 300.00),
+(NULL, 1, 'deposito', 500.00);
+
+DELIMITER //
+
+CREATE PROCEDURE Transferencia (
+    IN contaOrigem INT,
+    IN contaDestino INT,
+    IN valor DECIMAL(15, 2)
+)
+BEGIN
+    DECLARE saldoOrigem DECIMAL(15, 2);
+
+    START TRANSACTION;
+
+    SELECT saldo INTO saldoOrigem FROM Conta WHERE conta_id = contaOrigem FOR UPDATE;
+
+    IF saldoOrigem >= valor THEN
+        UPDATE Conta SET saldo = saldo - valor WHERE conta_id = contaOrigem;
+        UPDATE Conta SET saldo = saldo + valor WHERE conta_id = contaDestino;
+
+        INSERT INTO Transacao (conta_origem, conta_destino, tipo_transacao, valor)
+        VALUES (contaOrigem, contaDestino, 'transferencia', valor);
+
+        COMMIT;
+    ELSE
+        ROLLBACK;
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Saldo insuficiente';
+    END IF;
+END //
+
+DELIMITER //
+
+CREATE TRIGGER before_insert_transacao
+BEFORE INSERT ON Transacao
+FOR EACH ROW
+BEGIN
+    SET NEW.data_transacao = CURRENT_TIMESTAMP;
+END //
+
+DELIMITER //
+
+CREATE PROCEDURE Saque (
+    IN contaId INT,
+    IN valor DECIMAL(15, 2)
+)
+BEGIN
+    DECLARE saldoAtual DECIMAL(15, 2);
+
+    START TRANSACTION;
+
+    SELECT saldo INTO saldoAtual FROM Conta WHERE conta_id = contaId FOR UPDATE;
+
+    IF saldoAtual >= valor THEN
+        UPDATE Conta SET saldo = saldo - valor WHERE conta_id = contaId;
+
+        INSERT INTO Transacao (conta_origem, tipo_transacao, valor)
+        VALUES (contaId, 'saque', valor);
+
+        COMMIT;
+    ELSE
+        ROLLBACK;
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Saldo insuficiente';
+    END IF;
+END //
+
+DELIMITER //
+
+CREATE PROCEDURE ConsultaSaldo (
+    IN contaId INT,
+    OUT saldo DECIMAL(15, 2)
+)
+BEGIN
+    SELECT saldo INTO saldo FROM Conta WHERE conta_id = contaId;
+END //
+
+DELIMITER //
+
+CREATE PROCEDURE GerarExtrato (
+    IN contaId INT
+)
+BEGIN
+    SELECT * FROM Transacao 
+    WHERE conta_origem = contaId OR conta_destino = contaId 
+    ORDER BY data_transacao DESC;
+END //
+
+DELIMITER //
+
+CREATE PROCEDURE CriarCartaoCredito (
+    IN clienteId INT,
+    IN numeroCartao VARCHAR(16),
+    IN limiteCredito DECIMAL(15, 2)
+)
+BEGIN
+    INSERT INTO CartaoCredito (cliente_id, numero_cartao, limite)
+    VALUES (clienteId, numeroCartao, limiteCredito);
+END //
+
+DELIMITER //
+
+CREATE PROCEDURE RealizarCompra (
+    IN cartaoId INT,
+    IN descricao VARCHAR(255),
+    IN valor DECIMAL(15, 2)
+)
+BEGIN
+    DECLARE limiteAtual DECIMAL(15, 2);
+    DECLARE saldoUsadoAtual DECIMAL(15, 2);
+
+    SELECT limite, saldo_usado INTO limiteAtual, saldoUsadoAtual FROM CartaoCredito WHERE cartao_id = cartaoId FOR UPDATE;
+
+    IF (limiteAtual - saldoUsadoAtual) >= valor THEN
+        UPDATE CartaoCredito SET saldo_usado = saldo_usado + valor WHERE cartao_id = cartaoId;
+
+        INSERT INTO Compra (cartao_id, descricao, valor) VALUES (cartaoId, descricao, valor);
+    ELSE
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Limite de crédito insuficiente';
+    END IF;
+END //
+
+DELIMITER //
+
+CREATE PROCEDURE GerarFatura (
+    IN cartaoId INT,
+    IN dataInicio DATE,
+    IN dataFim DATE
+)
+BEGIN
+    DECLARE totalFatura DECIMAL(15, 2);
+
+    SELECT SUM(valor) INTO totalFatura 
+    FROM Compra 
+    WHERE cartao_id = cartaoId AND data_compra BETWEEN dataInicio AND dataFim;
+
+    INSERT INTO Fatura (cartao_id, data_inicio, data_fim, valor_total)
+    VALUES (cartaoId, dataInicio, dataFim, totalFatura);
+END //
+
+DELIMITER //
+
+CREATE PROCEDURE PagarFatura (
+    IN faturaId INT,
+    IN valorPagamento DECIMAL(15, 2)
+)
+BEGIN
+    DECLARE valorDevido DECIMAL(15, 2);
+    DECLARE cartaoId INT;
+
+    SELECT valor_total - valor_pago, cartao_id INTO valorDevido, cartaoId 
+    FROM Fatura WHERE fatura_id = faturaId FOR UPDATE;
+
+    IF valorPagamento <= valorDevido THEN
+        UPDATE Fatura 
+        SET valor_pago = valor_pago + valorPagamento, 
+            status = IF((valor_total - valor_pago - valorPagamento) = 0, 'paga', 'pendente')
+        WHERE fatura_id = faturaId;
+
+        UPDATE CartaoCredito 
+        SET saldo_usado = saldo_usado - valorPagamento 
+        WHERE cartao_id = cartaoId;
+    ELSE
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Valor de pagamento excede o valor devido';
+    END IF;
+END //
+DELIMITER ;
